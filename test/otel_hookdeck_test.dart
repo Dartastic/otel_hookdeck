@@ -1,0 +1,80 @@
+// Licensed under the Apache License, Version 2.0
+// Copyright 2025, Mindful Software LLC, All rights reserved.
+
+import 'package:dartastic_opentelemetry/dartastic_opentelemetry.dart';
+import 'package:dartastic_opentelemetry/testing.dart';
+import 'package:otel_hookdeck/otel_hookdeck.dart';
+import 'package:test/test.dart';
+
+void main() {
+  late TestHarness harness;
+  late InMemorySpanExporter spans;
+
+  setUpAll(() async {
+    harness = await maybeInitializeOtelForTest(
+      serviceName: 'otel_hookdeck-test',
+    );
+    spans = harness.spans;
+  });
+
+  setUp(() => harness.clear());
+
+  Map<String, Object> attrsOf(Span s) =>
+      {for (final a in s.attributes.toList()) a.key: a.value};
+
+  test('events.retry records attempt + source + destination', () async {
+    await tracedHookdeck<String>(
+      operation: 'events.retry',
+      invoke: () async => const HookdeckCallResult(
+        value: 'ok',
+        result: HookdeckResult(
+          eventId: 'evt_1',
+          sourceId: 'src_stripe',
+          destinationId: 'dest_api',
+          eventType: 'invoice.paid',
+          deliveryStatus: 'SUCCESSFUL',
+          attemptNumber: 2,
+          responseStatusCode: 200,
+          responseLatencyMs: 47,
+          statusCode: 200,
+        ),
+      ),
+    );
+    final a = attrsOf(spans.findSpanByName('hookdeck events.retry')!);
+    expect(a['hookdeck.event.id'], 'evt_1');
+    expect(a['hookdeck.source.id'], 'src_stripe');
+    expect(a['hookdeck.destination.id'], 'dest_api');
+    expect(a['hookdeck.delivery.status'], 'SUCCESSFUL');
+    expect(a['hookdeck.attempt.number'], 2);
+    expect(a['hookdeck.response.latency_ms'], 47);
+  });
+
+  test('FAILED delivery sets span error', () async {
+    await tracedHookdeck<String>(
+      operation: 'events.retrieve',
+      invoke: () async => const HookdeckCallResult(
+        value: 'ok',
+        result: HookdeckResult(
+          eventId: 'evt_2',
+          deliveryStatus: 'FAILED',
+          attemptNumber: 5,
+          responseStatusCode: 503,
+        ),
+      ),
+    );
+    expect(
+      spans.findSpanByName('hookdeck events.retrieve')!.status,
+      SpanStatusCode.Error,
+    );
+  });
+
+  test('suppression skips spans', () async {
+    await runWithoutHookdeckInstrumentationAsync(() async {
+      await tracedHookdeck<String>(
+        operation: 'sources.create',
+        invoke: () async => const HookdeckCallResult(value: 'v'),
+      );
+    });
+    expect(spans.findSpansStartingWith('hookdeck '), isEmpty);
+  });
+}
